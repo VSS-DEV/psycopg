@@ -6,10 +6,12 @@ import os
 import sys
 import time
 import queue
-import pytest
+import signal
 import threading
 import subprocess as sp
 from typing import List
+
+import pytest
 
 import psycopg
 
@@ -201,3 +203,47 @@ def test_identify_closure(dsn):
     finally:
         conn.close()
         conn2.close()
+
+
+@pytest.mark.slow
+@pytest.mark.subprocess
+def test_ctrl_c(dsn):
+    script = f"""\
+import psycopg
+
+ctrl_c = False
+
+with psycopg.connect({dsn!r}) as conn:
+    cur = conn.cursor()
+    try:
+        cur.execute("select pg_sleep(2)")
+    except KeyboardInterrupt:
+        ctrl_c = True
+
+    assert ctrl_c, "ctrl-c not received"
+    assert (
+        conn.info.transaction_status == psycopg.pq.TransactionStatus.INERROR
+    ), f"transaction status: {{conn.info.transaction_status!r}}"
+
+    conn.rollback()
+    assert (
+        conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    ), f"transaction status: {{conn.info.transaction_status!r}}"
+
+    cur.execute("select 1")
+    assert cur.fetchone() == (1,)
+"""
+    if sys.platform == "win32":
+        creationflags = sp.CREATE_NEW_PROCESS_GROUP
+        sig = signal.CTRL_C_EVENT
+    else:
+        creationflags = 0
+        sig = signal.SIGINT
+
+    proc = sp.Popen([sys.executable, "-s", "-c", script], creationflags=creationflags)
+    with pytest.raises(sp.TimeoutExpired):
+        outs, errs = proc.communicate(timeout=1)
+
+    proc.send_signal(sig)
+    proc.communicate()
+    assert proc.returncode == 0
