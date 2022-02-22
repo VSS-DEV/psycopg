@@ -208,13 +208,30 @@ def test_identify_closure(dsn):
 @pytest.mark.slow
 @pytest.mark.subprocess
 def test_ctrl_c(dsn):
-    script = f"""\
-import psycopg
+    if sys.platform == "win32":
+        sig = int(signal.CTRL_C_EVENT)
+        # Or pytest will recevie the Ctrl-C too
+        creationflags = sp.CREATE_NEW_PROCESS_GROUP
+    else:
+        sig = int(signal.SIGINT)
+        creationflags = 0
 
-ctrl_c = False
+    script = f"""\
+import os
+import time
+import psycopg
+from threading import Thread
+
+def tired_of_life():
+    time.sleep(1)
+    os.kill(os.getpid(), {sig!r})
+
+t = Thread(target=tired_of_life, daemon=True)
+t.start()
 
 with psycopg.connect({dsn!r}) as conn:
     cur = conn.cursor()
+    ctrl_c = False
     try:
         cur.execute("select pg_sleep(2)")
     except KeyboardInterrupt:
@@ -233,17 +250,9 @@ with psycopg.connect({dsn!r}) as conn:
     cur.execute("select 1")
     assert cur.fetchone() == (1,)
 """
-    if sys.platform == "win32":
-        creationflags = sp.CREATE_NEW_PROCESS_GROUP
-        sig = signal.CTRL_C_EVENT
-    else:
-        creationflags = 0
-        sig = signal.SIGINT
-
+    t0 = time.time()
     proc = sp.Popen([sys.executable, "-s", "-c", script], creationflags=creationflags)
-    with pytest.raises(sp.TimeoutExpired):
-        outs, errs = proc.communicate(timeout=1)
-
-    proc.send_signal(sig)
     proc.communicate()
+    t = time.time() - t0
     assert proc.returncode == 0
+    assert 1 < t < 2
